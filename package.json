@@ -1,0 +1,36 @@
+{
+  "name": "dsh-cc-relay",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Anthropic Messages relay provider with scoped Claude Code request compatibility for DSH.",
+  "license": "MIT",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./provider": "./lib/provider.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "client.js", "lib/*.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "engines": { "node": ">=22.19" },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1"
+  },
+  "scripts": {
+    "test": "node --test test/provider.test.mjs test/client.test.mjs",
+    "test:runtime": "node --import ./test/runtime-register.mjs --test test/runtime.test.mjs",
+    "check": "node --check index.js && node --check client.js && node --check lib/provider.js && node --check lib/protocol.js && node --check lib/configured.js"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-settings-models"]
+    }
+  }
+}

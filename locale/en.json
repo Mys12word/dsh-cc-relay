@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "CC relay",
+    "description": "Mark configured models as CC only and reuse their endpoints and API keys with Claude Code request compatibility, or configure an independent Anthropic Messages relay."
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "CC 中转",
+    "description": "为已配置模型添加“仅 CC”开关，复用原地址和密钥通过 Claude Code 请求兼容调用，也可独立配置 Anthropic Messages 中转。"
+  }
+}

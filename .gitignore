@@ -1,0 +1,19 @@
+node_modules/
+coverage/
+*.log
+.DS_Store
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+.credentials*
+.github-token*
+.cc-relay-github-token
+*.pem
+*.key
+
+# Generated distributions and machine-local release records
+*.tgz
+*.zip
+release-*.json
