@@ -1,108 +1,62 @@
-# CC 中转 — DSH Provider
+# 模型响应自动兼容 — DSH
 
-为 DSH 注册独立的 `cc-relay` 模型提供方。面向 Anthropic Messages 兼容中转接口，可开启 CC 请求兼容模式；不需要安装本机 Claude Code，也不读取 Claude 订阅 OAuth。
+0.3.0 改为默认自动识别响应的 Host 插件。继续在 DSH 中选择原来已配置的模型即可；不再注册「CC 中转」提供商，也不再提供逐模型「仅 CC」开关、专用模型表单或 `cc_relay_models` 工具。
 
-## 已配置模型设为仅 CC（0.2.0）
+## 自动处理什么
 
-在 Harness 网页版 **设置 → 模型** 底部的 **已配置模型 · 仅 CC** 面板中，搜索并勾选模型，选择认证方式后保存。之后继续选择原提供方下的原模型；只有勾选的精确“提供方 + 模型 ID”通过本插件调用。取消勾选并保存即可恢复原适配器。
+- 回复开头的 `<thinking>`、`<think>`、`<analysis>`、`<reasoning>` 包裹，转换到 DSH 的独立思考区；支持标签和内容分散在多个流增量中。正文中讨论标签、Markdown 代码和引用不作此转换。
+- 完整的 Anthropic Messages JSON、Messages SSE 文本，以及 OpenAI Chat Completions / Responses JSON、Responses SSE 文本，转换为 DSH 文本、思考和工具请求记录。
+- Claude Code `stream-json` / Agent SDK 的 assistant、stream_event、tool_result、result，以及 Codex `exec --json` 的 reasoning、agent_message、命令、文件与 MCP 记录，转换成可读消息。流事件与最终快照避免重复展示。
+- 原适配器已经正确生成的思考、工具调用、用量、错误和取消继续通过。转换不产生额外模型请求。
 
-复用原提供方已保存的 `baseURL`、`apiKeyEnv` 和自定义请求头，密钥仍由 DSH 每次请求读取，不复制到插件配置。不需要在独立 CC 中转表单重填地址或密钥。源提供方须保存明确的 Base URL 和 API Key 引用；订阅登录、账号令牌及云厂商原生鉴权不参与此模式。原协议即使是 OpenAI，勾选后也改用 Anthropic Messages，因此站点必须提供该接口。
+纯文本里的 JSON 工具请求默认显示为「未执行」记录；原生 DSH 工具调用保持正常执行。代码示例和真正的 JSON 调用在内容上可能完全一样，自动识别形状不能确定其用途。
 
-还可在聊天中要求设置，例如“把 gateway 的 claude-model 设为仅 CC”，由 `cc_relay_models` 工具列出或修改标记。保存本身不调用模型接口、不消耗模型额度。手机原生界面继续使用原模型；此专用管理面板位于 Harness Web。
+如果某个上游明确把完整模型协议 JSON 当作实际调用返回，可在插件高级设置中开启 **allowJsonToolCalls**，这是所有模型共用的一个总开关。开启后，完整 JSON 中的客户端工具请求只有在名称、参数匹配本次请求实际声明的工具时，才转换为 DSH 工具调用，之后仍由 DSH 执行及审批。不要用于经常要求模型原样展示工具协议示例的会话。
 
-仅 CC 请求强制启用 CC 兼容，思考使用上游默认行为，原提供方的 reasoning effort 不转发。流式、工具及签名回传由插件处理，失败直接报告，不尝试原适配器。插件在发送时读取原提供方配置；若从准备请求到发送之间更改了配置，以发送时的地址和密钥引用为准，不能保证沿用原适配器准备时的快照。原提供方仍负责模型选择器中的能力信息和请求准备校验，重试沿用原提供方策略。
+Claude Code 和 Codex CLI 的工具活动始终是观察记录，不参与上述执行开关：它们已由外部客户端负责，不能再执行一次。未声明工具、未知参数、无效 JSON、缺少结束标记、截断或失败响应不生成新调用；不递归解析回答字符串里的 JSON。
 
-插件的高级配置中新增 `ccOnlyModels`：
+## 请求与范围
 
-```yaml
-ccOnlyModels:
-  - provider: gateway
-    model: your-exact-model-id
-    authMode: bearer
-```
+插件只包装公开的 `llm/stream` 事件并调用一次 `next()`。原提供方继续负责地址、认证、OAuth、请求协议、模型能力、图片、思考档位、准备阶段快照、网络超时、重试和取消。插件不读取或复制密钥，不修改系统提示词、请求头或发送内容。
 
-## 独立中转配置
+这是响应内容兼容，不会解除站点的客户端准入限制，也不会自动修复错误的请求协议。如果原适配器在得到文本之前就因为鉴权、协议不匹配而失败，外层响应转换无法取回已被丢弃的原始 HTTP/SSE 数据。
 
-安装后在 Harness 网页版的 **设置 → 模型 → CC 中转 → CC 中转配置** 填写。手机原生界面暂未提供该专用表单，可从本机网页 `http://127.0.0.1:3080` 打开。更换已安装版本后，若安装工具提示需要重启，请在 DSH Go 设置中重启本机引擎，再刷新网页。
+转换只发生在本次模型输出上，旧会话日志不会改写。已转换内容不复用旧原生 replay/signature，避免旧签名与新内容错配；下次发送由原适配器按 DSH 标准消息重建，部分协议可能省略没有有效签名的历史思考。未转换的内容保留原 replay。
 
-填写以下三项：
+停用或卸载后，后续请求恢复原适配器输出；已经开始的请求会完成进入时的转换。网络取消仍由原适配器及调用方负责。
 
-1. **Base URL**：你的中转站地址。`https://example.com`、`https://example.com/v1` 或带路径前缀的根地址均可。
-2. **API Key**：填写中转站密钥，保存在 DSH 凭据服务中。默认引用为 `CC_RELAY_API_KEY`，配置文件不存密钥。
-3. **模型**：加入中转站提供的精确模型 ID，再从对话模型选择器选择该模型。
+## 配置
 
-其余设置在插件的自动配置页中。一个配置例子（密钥单独在模型页填写）：
+默认安装即可自动运行，仅有两个高级字段：
 
 ```yaml
-- id: cc-relay
-  config:
-    baseURL: https://your-relay.example
-    apiKeyEnv: CC_RELAY_API_KEY
-    authMode: bearer
-    models:
-      - id: your-exact-model-id
-        name: 我的中转 Claude
-        contextWindow: 200000
-        maxTokens: 32000
-        input: [text, image]
-    compatibility:
-      enabled: true
-      cliVersion: 2.1.287
-      stripModelSuffix: true
-      betas: []
+allowJsonToolCalls: false
+maxStructuredChars: 2097152
 ```
 
-`authMode: bearer` 发送 `Authorization: Bearer <key>`；`x-api-key` 发送 Anthropic 风格的密钥头。按站点文档选择。无地址和模型的初始安装只增加配置入口，不发送网络请求，也不改变当前模型。
+`maxStructuredChars` 是候选 JSON 的缓冲字符上限。超出时按原文输出，不截断普通回复、不限制 token 总量或工具次数。异常交错流的等待队列也受此预算保护。普通文本即时流出；候选 JSON 等完整结束后才进行原子转换。用量快照即时透传，只使用原请求用量，内层 JSON 的计费记录不会重复相加。
 
-## CC 请求兼容
+旧版 `baseURL`、`models`、`apiKeyEnv`、`compatibility`、`ccOnlyModels` 等字段在 0.3.0 中不再起作用；已保存的原提供方与凭据不受影响。原先只配置在独立 `cc-relay` 下的模型需要在 DSH 普通提供方中配置后使用。
 
-开启后作用于独立 `cc-relay`；已标记的仅 CC 模型始终启用以下兼容行为：
+## 备份与验证
 
-- 发送 CC 形式的客户端头、`x-app: cli` 和稳定的 `x-claude-code-session-id`，并保留 DSH 产品标识。
-- 请求体 `metadata.user_id` 包含与请求头一致的会话 UUID；机器标识仅使用本机信息的 SHA-256 摘要。
-- 前置兼容用的系统开头；保留 DSH 原有系统文本。
-- 把实际存在的 DSH `bash/read/write/edit/glob/grep/subagent` 分别映射成 `Bash/Read/Write/Edit/Glob/Grep/Agent`，收到调用后映射回 DSH 原名。原参数 schema 不变，工具仍由 DSH 执行和审批。
-- 可移除模型 `[1m]` 后缀并发送 `context-1m-2025-08-07`。其他 beta 仅在配置中指定时发送。
-
-不添加不存在的占位工具，不提供 CLI 的全部私有协议。关闭兼容模式后使用常规 Anthropic Messages 请求。各站点客户端校验不同，兼容模式不代表所有 CC-only 渠道都会接受；请使用你有权调用且允许此接法的中转渠道。如果站点要求官方客户端的完整行为，需使用该站允许的官方 CLI/SDK 路径。
-
-## 已实现
-
-- 流式文本、原生 reasoning 块投影到 DSH 独立的 reasoning 通道；回复正文不注入 `<thinking>` 标签。
-- 原始 JSON 工具参数、多个工具结果、历史消息和同模型签名回传。
-- 图片附件 base64 输入和文件引用文本，遵循 DSH 附件接口。
-- token 与缓存用量、结束原因、取消、卸载取消、空闲超时、HTTP/SSE 错误分类、错误信息密钥脱敏。
-- 独立中转的配置变更影响后续请求，已准备请求保持其配置；仅 CC 标记在发送时生效，已发出的请求保持该次读取的配置。
-
-## 限制与测试范围
-
-- 没有累计 token 额度或累计工具次数限制；单次 `maxTokens`、上下文容量和图片预算仍受模型、DSH 与站点限制。插件不改变中转商计费或配额。
-- 第一版不主动发送 `thinking`、`reasoning_effort` 或 `output_config` 控制，使用上游模型默认行为，也不在 DSH 宣告可选 reasoning effort。
-- 发送只支持 Anthropic Messages SSE；可复用已配置的模型列表，不把 OpenAI 格式转换为上游请求，也不自动向站点发现模型。独立中转的模型 ID 需手动配置。
-- 不自动执行或自动放行工具；沿用当前 DSH preset 和审批设置。
-- 本地模拟中转站测试不证明真实中转可用。真实联调需要站点 URL、精确模型 ID，以及在 DSH 中本地保存的密钥。
-
-## 开发验证
+升级前保留 0.2.0 安装包、源码包、完整 Git bundle 和提交标签，便于恢复。0.3.0 安装包只包含新的 Host 实现，不包含旧 Client、旧 RelayAdapter 或逐模型路由代码。
 
 ```sh
 npm run check
 npm test
+DSH_RUNTIME_ROOT=/opt/dsh/node_modules npm run test:runtime
 ```
 
-有 DSH 运行时安装目录时可运行额外契约测试：
+测试包含逐字符标签分割、代码与普通 JSON、多个内容块、CLI 观察流去重、Responses/Messages 转换、声明工具校验、取消、截断、缓冲预算、签名隔离、真实 DSH `BlockAssembler` / `prepareCall`，以及原 pi-ai 适配器通过 localhost 模拟 OpenAI 接口进行的工具往返。测试使用合成数据和本地假密钥，不调用真实模型站点；不能据此宣称所有上游都兼容。
 
-```sh
-DSH_RUNTIME_ROOT=/opt/dsh/node_modules \
-  node --import ./test/runtime-register.mjs \
-  --test test/runtime.test.mjs
-```
+## 格式资料
 
-测试使用 localhost 模拟中转站，不调用外部模型、不使用真实凭据。运行时测试 loader 仅用于验证，不是插件运行依赖。包内 `files` 清单限定安装产物，测试源码保留在工作区源码包中。
+- [Claude Code headless 与 JSON 输出](https://code.claude.com/docs/en/headless.md)
+- [Agent SDK 流式输出与完成快照](https://code.claude.com/docs/en/agent-sdk/streaming-output.md)
+- [Claude SDK 工具执行循环](https://code.claude.com/docs/en/agent-sdk/agent-loop.md)
+- [Anthropic Messages 流式协议](https://platform.claude.com/docs/en/build-with-claude/streaming.md)
+- [Codex exec JSONL 事件源码](https://github.com/openai/codex/blob/main/codex-rs/exec/src/exec_events.rs)
+- [OpenAI Responses 输出类型](https://github.com/openai/openai-python/tree/main/src/openai/types/responses)
 
-## 参考资料
-
-- [pi-cc-shim 的公开协议兼容说明](https://www.npmjs.com/package/pi-cc-shim)：不同网关会检查客户端头、系统开头、metadata 和工具名称；本实现不导入其代码。
-- [Claude Code 网关配置](https://code.claude.com/docs/en/llm-gateway-connect)：网关地址与认证变量。
-- [渠道区分示例](https://doc.voltapi.ai/quick-start)：CC 专用与不限客户端渠道需要分别核实。
-
-本项目为独立的 DSH 插件，图标为本项目原创 SVG，不代表 Anthropic 官方产品。
+包名 `dsh-cc-relay` 保留以便原位升级；插件显示名为「模型响应自动兼容」。本项目原创 SVG 图标，MIT 许可。

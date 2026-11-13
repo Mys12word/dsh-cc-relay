@@ -1,36 +1,28 @@
 {
   "name": "dsh-cc-relay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Anthropic Messages relay provider with scoped Claude Code request compatibility for DSH.",
+  "description": "Automatically translate model response wrappers and Claude Code/Codex JSON into DSH stream blocks.",
   "license": "MIT",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
-    "./provider": "./lib/provider.js",
-    "./client": "./client.js",
+    "./normalize": "./lib/normalize.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
-  "files": ["index.js", "client.js", "lib/*.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "files": ["index.js", "lib/normalize.js", "lib/structured.js", "lib/tagged-text.js", "lib/tools.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
   "engines": { "node": ">=22.19" },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "~3.19.0",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.1"
   },
   "scripts": {
-    "test": "node --test test/provider.test.mjs test/client.test.mjs",
+    "test": "node --test test/normalize.test.mjs",
     "test:runtime": "node --import ./test/runtime-register.mjs --test test/runtime.test.mjs",
-    "check": "node --check index.js && node --check client.js && node --check lib/provider.js && node --check lib/protocol.js && node --check lib/configured.js"
+    "check": "node --check index.js && node --check lib/normalize.js && node --check lib/structured.js && node --check lib/tagged-text.js && node --check lib/tools.js"
   },
-  "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": {
-      "platform": "web",
-      "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-settings-models"]
-    }
-  }
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
 }

@@ -1,233 +1,143 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { BlockAssembler } from '@deepseek-ai/dsh-llm'
-import { RelayAdapter } from '../lib/provider.js'
+import LlmRuntime, { LlmAdapter, BlockAssembler, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import * as pi from '@deepseek-ai/dsh-llm-pi-ai'
 import * as plugin from '../index.js'
-import { installConfiguredRouting, registerModelTool, validateSelections } from '../lib/configured.js'
 
-const collect = async source => { const result = []; for await (const chunk of source) result.push(chunk); return result }
-const request = { provider: 'cc-relay', model: 'test-model', sessionId: 'runtime-test', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] }
-const events = [
-  { type: 'message_start', message: { id: 'msg_runtime', usage: { input_tokens: 3, output_tokens: 0 } } },
-  { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
-  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'runtime OK' } },
-  { type: 'content_block_stop', index: 0 },
-  { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
-  { type: 'message_stop' },
-]
-
-test('plugin Config and apply register a configurable provider in the real DSH runtime', async t => {
-  const ctx = new Context()
-  t.after(() => ctx.fiber.dispose())
-  const llm = new LlmRuntime(ctx)
-  ctx.provide('credentials', { resolve: async () => undefined })
-  const config = plugin.Config({ models: [{ id: 'configured-model', input: ['text'] }] })
-  plugin.apply(ctx, config)
-  assert.deepEqual(llm.listProviders(), [{ id: 'cc-relay', name: 'CC 中转' }])
-  const directory = llm.listConfigurableProviders()[0]
-  assert.equal(directory.settingsNs, 'cc-relay')
-  assert.deepEqual(directory.settingsPath, [])
-  assert.equal((await llm.listModels('cc-relay'))[0].id, 'configured-model')
-  const prepared = await llm.prepareCall({ provider: 'cc-relay', model: 'configured-model' })
-  assert.equal(prepared.config.maxTokens, 32000)
-  assert.equal(prepared.context.contextWindow, 200000)
-  const chunks = await collect(prepared.stream({ ...request, ...prepared.config }))
-  assert.equal(chunks.at(-1).reason.kind, 'error')
-  assert.equal(chunks.at(-1).reason.failure.code, 'INVALID_CONFIG')
-})
-
-test('real DSH LLM preparation, streaming and BlockAssembler accept the adapter', async t => {
-  const ctx = new Context()
-  t.after(() => ctx.fiber.dispose())
-  const llm = new LlmRuntime(ctx)
-  const a = new RelayAdapter([['cc-relay', { baseURL: 'https://fake.invalid', models: [{ id: 'test-model' }] }]], {
-    resolveKey: async () => 'test-secret',
-    fetch: async () => new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } }),
-  })
-  const dispose = llm.registerAdapter(['cc-relay'], a)
-  assert.equal((await llm.listModels('cc-relay'))[0].id, 'test-model')
-  const model = await llm.resolveModelInfo('cc-relay', 'test-model')
-  assert.deepEqual(model.inputModalities, ['text', 'image'])
-  assert.equal(llm.imageRequestPricing('cc-relay', 'test-model'), undefined)
-  const prepared = await llm.prepareCall({ provider: 'cc-relay', model: 'test-model' })
-  const assembler = new BlockAssembler()
-  for await (const chunk of prepared.stream({ ...request, ...prepared.config })) assembler.push(chunk)
-  assert.deepEqual(assembler.blocks(), [{ type: 'text', text: 'runtime OK' }])
-  assert.deepEqual(assembler.usage, { inputTokens: 3, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 5 })
-  assert.equal(assembler.finish.kind, 'stop')
-  assert.equal(assembler.replayState.response.kind, 'dsh-cc-relay')
-  dispose()
-  assert.deepEqual(llm.listProviders(), [])
-})
-
-test('configured-model flag reuses source endpoint/key, keeps replay and returns to original adapter', async t => {
+const collect = async stream => { const result = []; for await (const chunk of stream) result.push(chunk); return result }
+const assemble = chunks => { const result = new BlockAssembler(); chunks.forEach(chunk => result.push(chunk)); return result }
+const options = { provider: 'existing', model: 'fixture', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] }
+const textChunks = text => [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'finish', reason: { kind: 'stop' }, replayState: { response: { fixture: true }, blocks: [{ signature: 'native' }] } }]
+class FixtureAdapter extends LlmAdapter {
+  calls = []
+  output = '<think>reasoning</think>answer'
+  providerInfo(provider) { return { id: provider, name: 'Existing' } }
+  async resolveModel(provider, model) { return { provider, id: model, name: model, inputModalities: ['text'], context: { contextWindow: 10000 }, reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } } }
+  async *stream(request) { this.calls.push(request); yield* textChunks(this.output) }
+}
+async function fixture(t, config = {}) {
   const ctx = new Context(); t.after(() => ctx.fiber.dispose())
   const llm = new LlmRuntime(ctx)
-  let calls = 0, key = 'first-source-key'
-  const captured = [], refs = []
-  const source = new RelayAdapter([['gateway', { baseURL: 'https://unused.invalid', models: [{ id: 'claude-test', maxTokens: 8192 }, { id: 'other' }] }]], {})
-  const original = { providerInfo: source.providerInfo.bind(source), providerRetryPolicy: () => undefined, imageRequestPricing: () => undefined, imageRequestTarget: source.imageRequestTarget.bind(source), listModels: source.listModels.bind(source), resolveModel: async (provider, model) => ({ ...source.modelInfo(provider, model), reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } }), prepareCall: async (provider, model) => ({ model: await original.resolveModel(provider, model), stream: options => original.stream(options) }), stream: async function* () { calls++; yield { type: 'finish', reason: { kind: 'stop' } } } }
-  llm.registerAdapter(['gateway'], original)
-  llm.registerConfigurableProviders([{ provider: 'gateway', displayName: 'Existing gateway', settingsNs: 'source-settings', settingsPath: ['providers', 'gateway'] }])
-  const values = { providers: { gateway: { baseURL: 'https://source.example/anthropic', apiKeyEnv: 'EXISTING_KEY', models: [{ id: 'claude-test', maxTokens: 8192 }], headers: { 'x-source': 'kept' } } } }
-  ctx.provide('settings', { describe: () => [{ ns: 'source-settings', value: structuredClone(values) }] })
-  ctx.provide('credentials', { resolve: async ref => { refs.push(ref); return { value: key } } })
-  const config = { ccOnlyModels: [{ provider: 'gateway', model: 'claude-test', authMode: 'bearer' }], headers: { 'x-other-relay': 'must-not-leak' } }
-  const output = [
-    events[0],
-    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: 'native reasoning' } },
-    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'source-signature' } },
-    { type: 'content_block_stop', index: 0 },
-    { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call_cc', name: 'Read', input: { file_path: 'demo.txt' } } },
-    { type: 'content_block_stop', index: 1 },
-    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 2 } }, { type: 'message_stop' },
-  ]
-  installConfiguredRouting(ctx, () => config, { resolveKey: async ref => (await ctx.credentials.resolve(ref))?.value, fetch: async (url, options) => { captured.push({ url, headers: options.headers, body: JSON.parse(options.body) }); const reply = captured.length === 1 ? output : events; return new Response(reply.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')) } })
-  const tool = { name: 'read', description: 'Read', parameters: { type: 'object' } }
-  const prepared = await llm.prepareCall({ provider: 'gateway', model: 'claude-test' })
+  const original = new FixtureAdapter()
+  llm.registerAdapter(['existing'], original)
+  let child
+  ctx.plugin(owner => { child = owner; plugin.apply(owner, plugin.Config(config)) })
+  await new Promise(resolve => setImmediate(resolve))
+  return { ctx, llm, original, child }
+}
+const read = { name: 'read', description: 'Read UTF-8', parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'], additionalProperties: false } }
+
+test('plugin adds no providers, configurable models, credentials dependency or tools', async t => {
+  const { llm } = await fixture(t)
+  assert.deepEqual(plugin.inject, ['llm'])
+  assert.deepEqual(llm.listProviders(), [{ id: 'existing', name: 'Existing' }])
+  assert.deepEqual(llm.listConfigurableProviders(), [])
+  assert.equal(plugin.Config({}).allowJsonToolCalls.get(), false)
+  const output = assemble(await collect(llm.stream(options)))
+  assert.deepEqual(output.blocks(), [{ type: 'reasoning', text: 'reasoning' }, { type: 'text', text: 'answer' }])
+  assert.equal(output.replayState, undefined)
+})
+
+test('real DSH prepareCall keeps original provider, effort, controls and immutable request', async t => {
+  const { llm, original } = await fixture(t)
+  const prepared = await llm.prepareCall({ provider: 'existing', model: 'fixture', maxTokens: 1024 })
   assert.equal(prepared.config.reasoningEffort, 'high')
-  const options = { ...request, ...prepared.config, tools: [tool] }
-  const before = structuredClone(options)
-  const assembler = new BlockAssembler()
-  for await (const chunk of prepared.stream(Object.freeze(options))) assembler.push(chunk)
-  assert.deepEqual(options, before)
-  assert.equal(calls, 0)
-  assert.equal(assembler.finish.kind, 'tool-calls')
-  assert.equal(captured[0].url, 'https://source.example/anthropic/v1/messages')
-  assert.equal(captured[0].headers.get('authorization'), 'Bearer first-source-key')
-  assert.equal(captured[0].headers.get('x-source'), 'kept')
-  assert.equal(captured[0].headers.get('x-other-relay'), null)
-  assert.equal(captured[0].body.model, 'claude-test')
-  assert.equal(captured[0].body.max_tokens, 8192)
-  assert.equal(captured[0].body.thinking, undefined)
-  assert.equal(captured[0].body.tools[0].name, 'Read')
-  key = 'rotated-source-key'
-  const history = [...request.messages, { role: 'assistant', source: { kind: 'model', provider: 'gateway', model: 'claude-test', replayState: assembler.replayState }, content: assembler.blocks() }, { role: 'tool', source: { kind: 'tool', callId: 'call_cc' }, toolCallId: 'call_cc', content: [{ type: 'text', text: 'actual result' }] }]
-  const chunks = await collect(llm.stream({ provider: 'gateway', model: 'claude-test', messages: history, tools: [tool] }))
-  assert.equal(chunks.at(-1).reason.kind, 'stop')
-  assert.equal(captured[1].headers.get('authorization'), 'Bearer rotated-source-key')
-  assert.equal(captured[1].body.messages[1].content[0].signature, 'source-signature')
-  assert.equal(captured[1].body.messages.at(-1).content[0].tool_use_id, 'call_cc')
-  assert.deepEqual(refs, ['EXISTING_KEY', 'EXISTING_KEY'])
-  await collect(llm.stream({ provider: 'gateway', model: 'other', messages: request.messages }))
-  assert.equal(calls, 1)
-  config.ccOnlyModels = []
-  await collect(llm.stream({ provider: 'gateway', model: 'claude-test', messages: request.messages }))
-  assert.equal(calls, 2)
+  const input = { ...options, ...prepared.config, tools: [read] }
+  const before = structuredClone(input)
+  Object.freeze(input)
+  const output = assemble(await collect(prepared.stream(input)))
+  assert.equal(output.finish.kind, 'stop')
+  assert.equal(original.calls.length, 1)
+  assert.equal(original.calls[0].provider, 'existing')
+  assert.equal(original.calls[0].reasoningEffort, 'high')
+  assert.equal(original.calls[0].maxTokens, 1024)
+  assert.deepEqual(input, before)
 })
 
-test('configured CC failure stays terminal and never falls back to the original adapter', async t => {
-  const ctx = new Context(); t.after(() => ctx.fiber.dispose())
-  const llm = new LlmRuntime(ctx)
-  let originalCalls = 0, fetched = 0
-  const original = new RelayAdapter([['gateway', { models: [{ id: 'test-model' }] }]], {})
-  original.stream = async function* () { originalCalls++; yield { type: 'finish', reason: { kind: 'stop' } } }
-  llm.registerAdapter(['gateway'], original)
-  llm.registerConfigurableProviders([{ provider: 'gateway', displayName: 'Gateway', settingsNs: 'source', settingsPath: [] }])
-  let value = { baseURL: 'https://source.invalid', apiKeyEnv: 'SOURCE_KEY' }
-  ctx.provide('settings', { describe: () => [{ ns: 'source', value }] })
-  installConfiguredRouting(ctx, () => ({ ccOnlyModels: [{ provider: 'gateway', model: 'test-model' }] }), { resolveKey: async () => 'key', fetch: async () => { fetched++; return new Response('{"error":{"message":"wrong key"}}', { status: 401 }) } })
-  const result = await collect(llm.stream({ ...request, provider: 'gateway' }))
-  assert.equal(result.at(-1).reason.failure.code, 'AUTH')
-  assert.equal(result.at(-1).reason.failure.status, 401)
-  value = { baseURL: 'https://source.invalid' }
-  const missing = await collect(llm.stream({ ...request, provider: 'gateway' }))
-  assert.equal(missing.at(-1).reason.failure.code, 'INVALID_CONFIG')
-  assert.equal(fetched, 1)
-  assert.equal(originalCalls, 0)
-  assert.throws(() => validateSelections([{ provider: 'gateway', model: 'a' }, { provider: 'gateway', model: 'a' }]))
+test('native replay survives unmodified output and unloading removes only the wrapper', async t => {
+  const { llm, original, child } = await fixture(t)
+  original.output = 'ordinary'
+  const plain = assemble(await collect(llm.stream(options)))
+  assert.deepEqual(plain.replayState, { response: { fixture: true }, blocks: [{ signature: 'native' }] })
+  await child.fiber.dispose()
+  original.output = '<think>raw</think>after unload'
+  const raw = assemble(await collect(llm.stream(options)))
+  assert.deepEqual(raw.blocks(), [{ type: 'text', text: original.output }])
+  assert.deepEqual(llm.listProviders(), [{ id: 'existing', name: 'Existing' }])
 })
 
-test('plugin activates routing and model tool together with settings, and tool writes only its flag', async t => {
-  const ctx = new Context(); t.after(() => ctx.fiber.dispose())
-  const llm = new LlmRuntime(ctx)
-  const tools = [], writes = []
-  let flags = []
-  const source = new RelayAdapter([['gateway', { models: [{ id: 'test-model' }] }]], {})
-  llm.registerAdapter(['gateway'], source)
-  llm.registerConfigurableProviders([{ provider: 'gateway', displayName: 'Gateway', settingsNs: 'source', settingsPath: [] }])
-  ctx.provide('credentials', { resolve: async () => undefined })
-  ctx.provide('tools', { register: definition => { tools.push(definition); return () => {} } })
-  ctx.provide('settings', {
-    describe: () => [{ ns: 'cc-relay', revision: 4, value: { ccOnlyModels: flags } }, { ns: 'source', value: { baseURL: 'https://source.invalid', apiKeyEnv: 'SOURCE_KEY', models: [{ id: 'test-model' }] } }],
-    mutate: async (ns, ops, revision) => { writes.push({ ns, ops, revision }); flags = ops[0].value },
+test('default JSON observations never create executable blocks in real BlockAssembler', async t => {
+  const { llm, original } = await fixture(t)
+  original.output = JSON.stringify({ id: 'msg_fixture', type: 'message', role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'call_json', name: 'read', input: { file_path: 'fixture.txt' } }] })
+  const message = assemble(await collect(llm.stream({ ...options, tools: [read] })))
+  assert.equal(message.blocks().some(block => block.type === 'tool-call'), false)
+  assert.match(message.blocks()[0].text, /未执行/)
+  assert.equal(message.finish.kind, 'stop')
+})
+
+test('global JSON opt-in keeps call IDs and accepts correlated next-turn tool result', async t => {
+  const { llm, original } = await fixture(t, { allowJsonToolCalls: true })
+  original.output = JSON.stringify({ id: 'msg_fixture', type: 'message', role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'call_json', name: 'Read', input: { file_path: 'fixture.txt' } }] })
+  const first = assemble(await collect(llm.stream({ ...options, tools: [read] })))
+  assert.equal(first.finish.kind, 'tool-calls')
+  assert.deepEqual(first.blocks(), [{ type: 'tool-call', id: 'call_json', name: 'read', arguments: '{"file_path":"fixture.txt"}' }])
+  const assistant = createAssistantMessage({ content: first.blocks(), source: { provider: 'existing', model: 'fixture' } })
+  const result = createToolResultMessage({ callId: 'call_json', content: [{ type: 'text', text: 'fixture contents' }] })
+  original.output = 'done'
+  await collect(llm.stream({ ...options, tools: [read], messages: [...options.messages, assistant, result] }))
+  assert.equal(original.calls.length, 2)
+  assert.equal(original.calls.at(-1).messages.at(-1).toolCallId, 'call_json')
+})
+
+test('original adapter failure remains terminal and makes no fallback request', async t => {
+  const { llm, original } = await fixture(t)
+  let count = 0
+  original.stream = async function* () { count++; throw Object.assign(new Error('fixture transport failure'), { code: 'TRANSPORT' }) }
+  const output = assemble(await collect(llm.stream(options)))
+  assert.equal(output.finish.kind, 'error')
+  assert.equal(count, 1)
+})
+
+test('actual pi-ai HTTP serialization remains on original route through a JSON tool round trip', async t => {
+  const requests = []
+  const server = createServer(async (request, response) => {
+    try {
+      let raw = ''; for await (const part of request) raw += part
+      const body = JSON.parse(raw)
+      requests.push({ path: request.url, authorization: request.headers.authorization, marker: request.headers['x-fixture'], body })
+      const content = requests.length === 1 ? JSON.stringify({ id: 'msg_http', type: 'message', role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'call_http', name: 'read', input: { file_path: 'fixture.txt' } }] }) : '<think>brief</think>HTTP done'
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({ id: 'chat_fixture', object: 'chat.completion.chunk', created: 1, model: 'fixture-model', choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`)
+      response.write(`data: ${JSON.stringify({ id: 'chat_fixture', object: 'chat.completion.chunk', created: 1, model: 'fixture-model', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } })}\n\n`)
+      response.end('data: [DONE]\n\n')
+    } catch { response.writeHead(500); response.end('fixture server failure') }
   })
-  plugin.apply(ctx, plugin.Config({}))
-  await new Promise(resolve => setImmediate(resolve))
-  const definition = tools.find(item => item.name === 'cc_relay_models')
-  assert.ok(definition, 'tool registered through nested optional injection')
-  const exec = { signal: new AbortController().signal }
-  const listed = await definition.execute({ action: 'list' }, exec)
-  assert.equal(listed.models.find(item => item.model === 'test-model').ccOnly, false)
-  const result = await definition.execute({ action: 'set', provider: 'gateway', model: 'test-model', enabled: true }, exec)
-  assert.equal(result.updated, true)
-  assert.equal(writes[0].ns, 'cc-relay')
-  assert.equal(writes[0].revision, 4)
-  assert.deepEqual(writes[0].ops, [{ op: 'set', path: ['ccOnlyModels'], value: [{ provider: 'gateway', model: 'test-model', authMode: 'bearer' }] }])
-  assert.equal(JSON.stringify(writes).includes('SOURCE_KEY'), false)
-  await definition.execute({ action: 'set', provider: 'gateway', model: 'test-model', enabled: false }, exec)
-  assert.deepEqual(flags, [])
-})
-
-test('unloading configured routing during metadata resolution prevents network dispatch', async t => {
+  server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)) })
   const ctx = new Context(); t.after(() => ctx.fiber.dispose())
   const llm = new LlmRuntime(ctx)
-  let release, announce, fetched = 0
-  const entered = new Promise(resolve => { announce = resolve })
-  const waiting = new Promise(resolve => { release = resolve })
-  const original = new RelayAdapter([['gateway', { models: [{ id: 'test-model' }] }]], {})
-  original.resolveModel = async (provider, model) => { announce(); await waiting; return original.modelInfo(provider, model) }
-  llm.registerAdapter(['gateway'], original)
-  llm.registerConfigurableProviders([{ provider: 'gateway', displayName: 'Gateway', settingsNs: 'source', settingsPath: [] }])
-  ctx.provide('settings', { describe: () => [{ ns: 'source', value: { baseURL: 'https://source.invalid', apiKeyEnv: 'SOURCE_KEY' } }] })
-  let owner
-  ctx.plugin(child => {
-    owner = child
-    installConfiguredRouting(child, () => ({ ccOnlyModels: [{ provider: 'gateway', model: 'test-model' }] }), { resolveKey: async () => 'key', fetch: async () => { fetched++; throw new Error('must not fetch') } })
-  })
-  await new Promise(resolve => setImmediate(resolve))
-  assert.ok(owner)
-  const result = collect(llm.stream({ ...request, provider: 'gateway' }))
-  await entered
-  await owner.fiber.dispose()
-  release()
-  const chunks = await result
-  assert.equal(chunks.at(-1).reason.kind, 'aborted')
-  assert.equal(fetched, 0)
-})
-
-test('malformed flags fail only their exact route and leave unrelated models usable', async t => {
-  const ctx = new Context(); t.after(() => ctx.fiber.dispose())
-  const llm = new LlmRuntime(ctx)
-  let originalCalls = 0
-  const original = new RelayAdapter([['gateway', { models: [{ id: 'test-model' }, { id: 'other' }] }]], {})
-  original.stream = async function* () { originalCalls++; yield { type: 'finish', reason: { kind: 'stop' } } }
-  llm.registerAdapter(['gateway'], original)
-  llm.registerConfigurableProviders([{ provider: 'gateway', displayName: 'Gateway', settingsNs: 'source', settingsPath: [] }])
-  ctx.provide('settings', { describe: () => [{ ns: 'source', value: { baseURL: 'https://source.invalid', apiKeyEnv: 'KEY' } }] })
-  const flag = { provider: 'gateway', model: 'test-model' }
-  installConfiguredRouting(ctx, () => ({ ccOnlyModels: [flag, flag] }), { resolveKey: async () => 'key' })
-  const unrelated = await collect(llm.stream({ ...request, provider: 'gateway', model: 'other' }))
-  assert.equal(unrelated.at(-1).reason.kind, 'stop')
-  assert.equal(originalCalls, 1)
-  const selected = await collect(llm.stream({ ...request, provider: 'gateway' }))
-  assert.equal(selected.at(-1).reason.kind, 'error')
-  assert.equal(selected.at(-1).reason.failure.code, 'INVALID_CONFIG')
-  assert.equal(originalCalls, 1)
-})
-
-test('adapter failures normalize to DSH terminal chunks', async t => {
-  const ctx = new Context()
-  t.after(() => ctx.fiber.dispose())
-  const llm = new LlmRuntime(ctx)
-  const a = new RelayAdapter([['cc-relay', { baseURL: 'https://fake.invalid' }]], {
-    resolveKey: async () => 'test-secret',
-    fetch: async () => new Response('{"error":{"message":"wrong key"}}', { status: 401 }),
-  })
-  llm.registerAdapter(['cc-relay'], a)
-  const chunks = await collect(llm.stream(request))
-  assert.equal(chunks.at(-1).reason.kind, 'error')
-  assert.equal(chunks.at(-1).reason.failure.code, 'AUTH')
-  assert.equal(chunks.at(-1).reason.failure.status, 401)
+  ctx.provide('credentials', { resolve: async ref => { assert.equal(ref, 'FIXTURE_ONLY_KEY'); return { value: 'local-fixture-key' } }, readRecord: async () => undefined })
+  pi.apply(ctx, pi.Config({ providers: { 'fixture-route': { api: 'openai-completions', baseURL: `http://127.0.0.1:${server.address().port}/v1`, apiKeyEnv: 'FIXTURE_ONLY_KEY', headers: { 'x-fixture': 'kept' }, models: [{ id: 'fixture-model', input: ['text'], contextWindow: 10000, maxTokens: 2048, reasoningEfforts: false }] } } }))
+  plugin.apply(ctx, plugin.Config({ allowJsonToolCalls: true }))
+  const input = { provider: 'fixture-route', model: 'fixture-model', messages: options.messages, tools: [read], maxTokens: 256 }
+  const first = assemble(await collect(llm.stream(input)))
+  assert.equal(first.finish.kind, 'tool-calls', JSON.stringify(first.finish))
+  assert.deepEqual(first.blocks(), [{ type: 'tool-call', id: 'call_http', name: 'read', arguments: '{"file_path":"fixture.txt"}' }])
+  const assistant = createAssistantMessage({ content: first.blocks(), source: { provider: input.provider, model: input.model } })
+  const result = createToolResultMessage({ callId: 'call_http', content: [{ type: 'text', text: 'HTTP fixture contents' }] })
+  const second = assemble(await collect(llm.stream({ ...input, messages: [...input.messages, assistant, result] })))
+  assert.equal(second.finish.kind, 'stop', JSON.stringify(second.finish))
+  assert.deepEqual(second.blocks(), [{ type: 'reasoning', text: 'brief' }, { type: 'text', text: 'HTTP done' }])
+  assert.deepEqual(second.usage, { inputTokens: 3, outputTokens: 2, totalTokens: 5 })
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].path, '/v1/chat/completions')
+  assert.equal(requests[0].authorization, 'Bearer local-fixture-key')
+  assert.equal(requests[0].marker, 'kept')
+  assert.equal(requests[0].body.model, 'fixture-model')
+  assert.equal(requests[0].body.tools[0].function.name, 'read')
+  assert.equal(requests[1].body.messages.find(message => message.role === 'tool').tool_call_id, 'call_http')
+  assert.equal(llm.listProviders().some(provider => provider.id === 'cc-relay'), false)
 })
