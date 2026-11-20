@@ -1,6 +1,6 @@
 {
   "name": "dsh-cc-relay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Automatically translate model response wrappers and Claude Code/Codex JSON into DSH stream blocks.",
@@ -8,21 +8,29 @@
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./normalize": "./lib/normalize.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
-  "files": ["index.js", "lib/normalize.js", "lib/structured.js", "lib/tagged-text.js", "lib/tools.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "files": ["index.js", "client.js", "lib/normalize.js", "lib/structured.js", "lib/tagged-text.js", "lib/tools.js", "lib/stats.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "CHANGELOG.md", "LICENSE"],
   "engines": { "node": ">=22.19" },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": "~3.19.0",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1"
+    "@deepseek-ai/schemastery": "3.18.5 || 3.19.0",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5"
   },
   "scripts": {
-    "test": "node --test test/normalize.test.mjs",
-    "test:runtime": "node --import ./test/runtime-register.mjs --test test/runtime.test.mjs",
-    "check": "node --check index.js && node --check lib/normalize.js && node --check lib/structured.js && node --check lib/tagged-text.js && node --check lib/tools.js"
+    "test": "node test/run-compatibility.cjs",
+    "test:runtime": "node test/run-compatibility.cjs",
+    "check": "node --check index.js && node --check client.js && node --check lib/normalize.js && node --check lib/structured.js && node --check lib/tagged-text.js && node --check lib/tools.js && node --check lib/stats.js"
   },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-locale"]
+    }
+  }
 }

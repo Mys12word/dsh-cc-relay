@@ -1,5 +1,6 @@
 import z from '@deepseek-ai/schemastery'
 import { normalizeStream } from './lib/normalize.js'
+import { createReasoningStats, STATS_ROUTE } from './lib/stats.js'
 
 export const name = 'response-compat'
 export const inject = ['llm']
@@ -9,6 +10,20 @@ export const Config = z.object({
 })
 
 export function apply(ctx, config) {
+  const stats = createReasoningStats()
+  // Headless profiles can still normalize streams without the Web transport.
+  ctx.inject(['connection'], (webCtx) => {
+    const registry = webCtx.connection.fetch
+    if (typeof registry?.register !== 'function') return
+    registry.register({
+      path: STATS_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      async fetch() {
+        return Response.json(stats.snapshot(), { headers: { 'cache-control': 'no-store' } })
+      },
+    })
+  })
   // Config snapshots are per request. Active calls finish under the wrapper they
   // entered; unload only withdraws it from subsequent requests. The original
   // provider remains the sole owner of network cancellation and authentication.
@@ -17,6 +32,6 @@ export function apply(ctx, config) {
     const maxStructuredChars = typeof setting?.get === 'function' ? setting.get() : setting
     const flag = config.allowJsonToolCalls
     const allowJsonToolCalls = typeof flag?.get === 'function' ? flag.get() : flag
-    return normalizeStream(next(), options, { maxStructuredChars, allowJsonToolCalls })
+    return normalizeStream(next(), options, { maxStructuredChars, allowJsonToolCalls, onReasoningConversion: stats.record })
   })
 }

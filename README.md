@@ -15,6 +15,14 @@
 
 Claude Code 和 Codex CLI 的工具活动始终是观察记录，不参与上述执行开关：它们已由外部客户端负责，不能再执行一次。未声明工具、未知参数、无效 JSON、缺少结束标记、截断或失败响应不生成新调用；不递归解析回答字符串里的 JSON。
 
+## 思考转换统计（0.4.0）
+
+在 DSH 左侧「插件」打开「模型响应自动兼容」详情页，找到「思考转换统计」。统计显示本次插件运行的总数，以及思考标签、Claude Code / Agent SDK、Codex、Anthropic Messages、OpenAI Chat Completions 和 OpenAI Responses 的分项。界面打开时每约 5 秒更新。
+
+每个**由本插件实际输出的非空 DSH 思考块**记 1 次，不按标签字符、流片段、请求数或 token 数计算。同一回复产生多个独立思考块时分别计数；连续标签若合成同一个思考块则只计 1 次。模型已原生输出的思考块、普通正文、工具块和没有完成输出的块不计入。
+
+计数保存在宿主内存，覆盖本次插件激活后的模型调用。刷新网页不会清零；重启 DSH 或重新启用插件会清零。不回查历史，不记录回复内容、工具参数或密钥，也不额外调用模型。Web 统计页在 DSH 0.2.2-rc.5 上适配；无 Web 传输的宿主仍可正常转换响应。
+
 ## 请求与范围
 
 插件只包装公开的 `llm/stream` 事件并调用一次 `next()`。原提供方继续负责地址、认证、OAuth、请求协议、模型能力、图片、思考档位、准备阶段快照、网络超时、重试和取消。插件不读取或复制密钥，不修改系统提示词、请求头或发送内容。
@@ -38,17 +46,22 @@ maxStructuredChars: 2097152
 
 旧版 `baseURL`、`models`、`apiKeyEnv`、`compatibility`、`ccOnlyModels` 等字段在 0.3.0 中不再起作用；已保存的原提供方与凭据不受影响。原先只配置在独立 `cc-relay` 下的模型需要在 DSH 普通提供方中配置后使用。
 
-## 备份与验证
+## 兼容修复与验证
 
-升级前保留 0.2.0 安装包、源码包、完整 Git bundle 和提交标签，便于恢复。0.3.0 安装包只包含新的 Host 实现，不包含旧 Client、旧 RelayAdapter 或逐模型路由代码。
+0.3.1 修正 0.3.0 把 `@deepseek-ai/dsh-llm` 精确锁定在 `0.2.2-rc.1`、导致 DSH `0.2.2-rc.3` 拒绝加载的问题。保留原支持基线 `rc.1`，新增已验证的 `rc.3`；Schemastery 声明为已核实的 `3.18.5 || 3.19.0`。不授予版本豁免，不修改响应转换实现和默认配置，也不扩大到未验证的后续 DSH 版本。
+
+在当前安装启动的终端中运行：
 
 ```sh
 npm run check
 npm test
-DSH_RUNTIME_ROOT=/opt/dsh/node_modules npm run test:runtime
 ```
 
-测试包含逐字符标签分割、代码与普通 JSON、多个内容块、CLI 观察流去重、Responses/Messages 转换、声明工具校验、取消、截断、缓冲预算、签名隔离、真实 DSH `BlockAssembler` / `prepareCall`，以及原 pi-ai 适配器通过 localhost 模拟 OpenAI 接口进行的工具往返。测试使用合成数据和本地假密钥，不调用真实模型站点；不能据此宣称所有上游都兼容。
+测试使用 `DSH_INSTALL_DIR` 定位当前 Harness，在桌面版使用 `DSH_NODE_EXECUTABLE` 指向的 Electron 读取 ASAR 内真实模块。`CC_TEST_SCHEMA_ROOT` 可指向 profile 中的 Schemastery 包目录，以分别复验实际插件依赖和 Host 内置依赖。
+
+0.4.0 在 DSH `0.2.2-rc.5` 上通过 24 项回归：除原有的流转换、工具校验、签名隔离与取消检查，还覆盖所有思考转换来源、原生思考及未输出块不计数、统计读取权限和插件卸载。验证使用真实 Cordis waterfall、`LlmRuntime.prepareCall`、`BlockAssembler` 和 Host Connection。
+
+测试只用合成响应和本地适配器，不调用真实模型站点。0.3.1 曾在 DSH `0.2.2-rc.3` 下分别使用 Schemastery `3.18.5`、`3.19.0` 通过当时的 19 项回归；新版统计界面未在旧版 DSH 上验证。
 
 ## 格式资料
 
@@ -59,4 +72,8 @@ DSH_RUNTIME_ROOT=/opt/dsh/node_modules npm run test:runtime
 - [Codex exec JSONL 事件源码](https://github.com/openai/codex/blob/main/codex-rs/exec/src/exec_events.rs)
 - [OpenAI Responses 输出类型](https://github.com/openai/openai-python/tree/main/src/openai/types/responses)
 
-包名 `dsh-cc-relay` 保留以便原位升级；插件显示名为「模型响应自动兼容」。本项目原创 SVG 图标，MIT 许可。
+## 项目插画
+
+[查看三张模型插画](docs/model-artwork/README.md)。插画只用于项目文档，不随插件安装包分发。
+
+包名 `dsh-cc-relay` 保留以便原位升级；插件显示名为「模型响应自动兼容」。插件的 SVG 图标为原创，项目采用 MIT 许可。

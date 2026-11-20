@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Automatic response compatibility",
-    "description": "Translate reasoning tags and Claude Code, Codex, Anthropic and OpenAI response JSON into DSH blocks while retaining each model's original provider."
+    "description": "Translate reasoning tags and Claude Code, Codex, Anthropic and OpenAI response JSON into DSH blocks while retaining each model's original provider. The plugin detail page shows reasoning conversion totals by source."
   }
 }

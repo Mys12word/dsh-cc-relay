@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "模型响应自动兼容",
-    "description": "自动识别思考标签和 Claude Code、Codex、Anthropic、OpenAI 响应 JSON，转换为 DSH 文本、思考和工具块；继续使用原模型，无需单独配置提供商。"
+    "description": "自动识别思考标签和 Claude Code、Codex、Anthropic、OpenAI 响应 JSON，转换为 DSH 文本、思考和工具块。插件详情可查看思考转换总数和来源；继续使用原模型，无需单独配置提供商。"
   }
 }
